@@ -30,7 +30,12 @@ byte reset_pin = 35;
 byte cs_pin = 32;
 #endif
 
+#define SPI_SPEED_SLOW 100000
+#define SPI_SPEED_FAST 2000000
+
 #define MEAS_PER_MSG 5
+
+#define CONFIG3_DEFAULT 0b11001000
 
 uint8_t sendBuffer[8 * MEAS_PER_MSG];
 
@@ -57,17 +62,20 @@ byte received;
 boolean verbosity = 1;
 byte numberOfChannels;
 
-// Serial comm
-const byte numChars = 32;
-char receivedChars[numChars];
-char tempChars[numChars]; // temporary array for use when parsing
-int command[2];
-boolean newData = false;
-
 byte state = 0;
 
 int elapsed = 0;
 long prevMicros = 0;
+
+void spiSlow()
+{
+  SPI.beginTransaction(SPISettings(SPI_SPEED_SLOW, MSBFIRST, SPI_MODE1));
+}
+
+void spiFast()
+{
+  SPI.beginTransaction(SPISettings(SPI_SPEED_SLOW, MSBFIRST, SPI_MODE1));
+}
 
 void print8bits(int var)
 {
@@ -99,6 +107,7 @@ void printData()
 
 void displayRegs()
 {
+  adc.syncRegData();
   Serial.println("REGISTERS: ");
   for (int i = 0; i < adc.getRegisterSize(); i++)
   {
@@ -140,13 +149,49 @@ void sendData()
   }
 }
 
+void sendRegister()
+{
+  adc.syncRegData();
+  for (int i = 0; i < adc.getRegisterSize(); i++)
+  {
+    sendBuffer[i] = adc.getRegister(i);
+  }
+  UDP.beginPacket(UDP.remoteIP(), UDP.remotePort());
+  UDP.write(sendBuffer, adc.getRegisterSize() - 1);
+  UDP.endPacket();
+}
+
+void sendLoffState()
+{
+  adc.syncRegData();
+  byte statp = adc.getRegister(ADS119X_ADD_LOFF_STATP);
+  byte statn = adc.getRegister(ADS119X_ADD_LOFF_STATN);
+  byte rldstat = adc.getRegister(ADS119X_ADD_CONFIG3) & 0x01;
+
+  sendBuffer[0] = statp;
+  sendBuffer[1] = statn;
+  sendBuffer[2] = rldstat;
+
+  UDP.beginPacket(UDP.remoteIP(), UDP.remotePort());
+  UDP.write(sendBuffer, numberOfChannels * 4);
+  UDP.endPacket();
+}
+
+void sendResponse(bool success)
+{
+  sendBuffer[0] = success ? 1 : 0;
+  UDP.beginPacket(UDP.remoteIP(), UDP.remotePort());
+  UDP.write(sendBuffer, 1);
+  UDP.endPacket();
+}
+
 void handleData()
 {
   fillSendBuffer();
   sendData();
 }
 
-bool handleStartMessage(int len)
+bool handleConfigMessage(int len)
 {
   DeserializationError error = deserializeJson(packetJson, &packet[1]);
 
@@ -178,19 +223,30 @@ bool handleStartMessage(int len)
   {
     adc.WREG(ADS119X_ADD_RLD_SENSP, rldSensP & 0xFF);
   }
+  else
+  {
+    adc.WREG(ADS119X_ADD_RLD_SENSP, 0);
+  }
 
   if (rldSensN >= 0)
   {
     adc.WREG(ADS119X_ADD_RLD_SENSN, rldSensN & 0xFF);
   }
+  else
+  {
+    adc.WREG(ADS119X_ADD_RLD_SENSN, 0);
+  }
+  
 
   if (rldSensP >= 0 || rldSensN >= 0)
   {
-    adc.WREG(ADS119X_ADD_CONFIG3, adc.getRegister(ADS119X_ADD_CONFIG3) | ADS119X_NOT_PD_RLD_MASK | ADS119X_RLD_MEAS_MASK | ADS119X_RLDREF_INT_MASK);
+    Serial.println(CONFIG3_DEFAULT | ADS119X_NOT_PD_RLD_MASK | ADS119X_RLD_MEAS_MASK | ADS119X_RLDREF_INT_MASK);
+    adc.WREG(ADS119X_ADD_CONFIG3, CONFIG3_DEFAULT | ADS119X_NOT_PD_RLD_MASK | ADS119X_RLD_MEAS_MASK | ADS119X_RLDREF_INT_MASK);
   }
   else
   {
-    adc.WREG(ADS119X_ADD_CONFIG3, adc.getRegister(ADS119X_ADD_CONFIG3) & ~(ADS119X_NOT_PD_RLD_MASK | ADS119X_RLD_MEAS_MASK | ADS119X_RLDREF_INT_MASK));
+    Serial.println(CONFIG3_DEFAULT & ~(ADS119X_NOT_PD_RLD_MASK | ADS119X_RLD_MEAS_MASK | ADS119X_RLDREF_INT_MASK));
+    adc.WREG(ADS119X_ADD_CONFIG3, CONFIG3_DEFAULT);
   }
 
   byte currentChannel = 0;
@@ -208,8 +264,6 @@ bool handleStartMessage(int len)
     int powerDown = channel["power_down"] | -1;
     int gain = channel["gain"] | -1;
     int mux = channel["mux"] | -1;
-
-    Serial.println(gain);
 
     if (powerDown != 1)
     {
@@ -238,7 +292,6 @@ void setup()
 {
   Serial.begin(1000000);
   Serial.println("Init");
-  SPI.beginTransaction(SPISettings(2000000, MSBFIRST, SPI_MODE1));
 
   // Begin WiFi
   WiFi.begin(WIFI_SSID, WIFI_PASS);
@@ -270,6 +323,8 @@ void setup()
     {
       Serial.print("ADS119X Conected");
       Serial.println("");
+      adc.sendCommand(ADS119X_CMD_SDATAC);
+      delay(10);
       displayRegs();
       Serial.print("Num Channels: ");
       Serial.print(numberOfChannels);
@@ -283,14 +338,15 @@ void setup()
 
   // Stop continuous conversion, and send commands to configure
   adc.sendCommand(ADS119X_CMD_SDATAC);
+  delay(10);
   adc.setAllChannelGain(ADS119X_CHnSET_GAIN_12);
   adc.setAllChannelMux(ADS119X_CHnSET_MUX_NORMAL);
   adc.setDataRate(ADS119X_DRATE_1000SPS);
 
-  // RLD --> RLD1P, RLD1N, RLD2P
+  // // RLD --> RLD1P, RLD1N, RLD2P
   adc.WREG(ADS119X_ADD_RLD_SENSP, 0x03);
   adc.WREG(ADS119X_ADD_RLD_SENSN, 0x01);
-  adc.WREG(ADS119X_ADD_CONFIG3, adc.getRegister(ADS119X_ADD_CONFIG3) | ADS119X_NOT_PD_RLD_MASK | ADS119X_RLDREF_INT_MASK);
+  adc.WREG(ADS119X_ADD_CONFIG3, CONFIG3_DEFAULT | ADS119X_NOT_PD_RLD_MASK | ADS119X_RLD_MEAS_MASK | ADS119X_RLDREF_INT_MASK);
 
   displayRegs();
 }
@@ -303,32 +359,108 @@ void loop()
   {
     memset(&packet, 0, sizeof(packet));
     int len = UDP.read(packet, 255);
+    remoteIp = UDP.remoteIP();
+    remotePort = UDP.remotePort();
     if (len > 0)
     {
+      Serial.printf("Received message: %s\n", packet);
       switch (packet[0])
       {
-      case 's':
-        Serial.printf("Received message: %s\n", packet);
-        sendUdp = true;
-        currentCycle = 0;
-        remoteIp = UDP.remoteIP();
-        remotePort = UDP.remotePort();
-        adc.sendCommand(ADS119X_CMD_SDATAC);
-        if (len == 1 || handleStartMessage(len))
+      case 'c':
+        if (len > 1)
         {
-          Serial.println("Start sending");
-          displayRegs();
-          adc.sendCommand(ADS119X_CMD_RDATAC);
+          sendUdp = false;
+          spiSlow();
+          adc.sendCommand(ADS119X_CMD_SDATAC);
+          delay(10);
+          sendResponse(handleConfigMessage(len));
         }
         else
         {
-          Serial.println("Packet invalid!");
+          sendResponse(false);
+        }
+        break;
+      case 's':
+        if (len == 1)
+        {
+          sendUdp = true;
+          currentCycle = 0;
+          Serial.println("Start sending");
+          displayRegs();
+          sendResponse(true);
+          adc.sendCommand(ADS119X_CMD_RDATAC);
+          spiFast();
+          delay(10);
+        }
+        else
+        {
+          sendResponse(false);
         }
         break;
       case 'f':
-        Serial.println("Stop sending");
+        if (len == 1)
+        {
+          Serial.println("Stop sending");
+          sendUdp = false;
+          spiSlow();
+          adc.sendCommand(ADS119X_CMD_SDATAC);
+          delay(10);
+          sendResponse(true);
+        }
+        else
+        {
+          sendResponse(false);
+        }
+        
+        break;
+      case 'l':
+        // Lead-off detection
         sendUdp = false;
+        memset(&sendBuffer, 0, sizeof(sendBuffer));
+        spiSlow();
         adc.sendCommand(ADS119X_CMD_SDATAC);
+        delay(10);
+        // Comparator threshold at 85% and 15%, DC pull-up/down
+        adc.WREG(ADS119X_ADD_LOFF, 0b10010011);
+        // Turn-on dc lead-off comparators
+        adc.WREG(ADS119X_ADD_CONFIG4, 0x02);
+        adc.WREG(ADS119X_ADD_LOFF_SENSP, 0xFF);
+        adc.WREG(ADS119X_ADD_LOFF_SENSN, 0xFB);
+        delay(10);
+
+        adc.sendCommand(ADS119X_CMD_RDATAC);
+        spiFast();
+        delay(10);
+
+        while (adc.isDRDY()) {}
+        while (!adc.isDRDY()) {}
+
+        adc.readChannelData();
+
+        currentCycle = 1;
+        fillSendBuffer();
+
+        adc.sendCommand(ADS119X_CMD_SDATAC);
+        delay(10);
+        spiSlow();
+
+        sendLoffState();
+        displayRegs();
+
+        adc.WREG(ADS119X_ADD_LOFF_SENSP, 0x00);
+        adc.WREG(ADS119X_ADD_LOFF_SENSN, 0x00);
+        adc.WREG(ADS119X_ADD_CONFIG4, 0x00);
+        break;
+      case 't':
+        sendUdp = true;
+        spiSlow();
+        sendResponse(true);
+        adc.testSignal();
+        spiFast();
+        break;
+      case '?':
+        spiSlow();
+        sendRegister();
         break;
       default:
         break;

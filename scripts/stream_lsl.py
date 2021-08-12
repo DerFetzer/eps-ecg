@@ -46,6 +46,7 @@ def main():
     outlet = pylsl.StreamOutlet(info, 30, 360)
 
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, 0)
+    s.settimeout(2)
 
     s.sendto(b"s", (SERVER_IP, SERVER_PORT))
 

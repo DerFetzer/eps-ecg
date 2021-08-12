@@ -1,6 +1,8 @@
 """Example program to demonstrate how to send a multi-channel time-series
 with proper meta-data to LSL."""
 from datetime import datetime
+import json
+import time
 
 import socket
 import struct
@@ -20,13 +22,47 @@ VREF = 2.4
 
 
 def main():
+    time.sleep(2)
+
     channel_names = ["I", "II", "III", "NA"]
     signal_headers = highlevel.make_signal_headers(channel_names, dimension='uV', sample_rate=SAMPLE_RATE,
                                                    physical_min=-1*(VREF/GAIN)*1000*1000-100, physical_max=(VREF/GAIN)*1000*1000+100)
 
+    params = {"data_rate": 3,
+              "rld_sens_p": -1,
+              "rld_sens_n": -1,
+              "channels": [
+                  {"gain": 6, "mux": 0},
+                  {"gain": 6, "mux": 0},
+                  {"gain": 6, "mux": 0},
+                  {"gain": 6, "mux": 2}
+              ]}
+
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, 0)
+    s.settimeout(2)
+
+    # s.sendto(b"c" + json.dumps(params).encode("latin-1"), (SERVER_IP, SERVER_PORT))
+    #
+    # data = s.recv(4096)
+    # if data[0] == 1:
+    #     print("Config successful")
+    #     s.sendto(b"?", (SERVER_IP, SERVER_PORT))
+    #     data = s.recv(4096)
+    #     for b in data:
+    #         print(f"{bin(b)}")
+    #     print(data.hex(" ", 1))
+    # else:
+    #     print("Config not successful")
+    #     raise RuntimeError()
 
     s.sendto(b"s", (SERVER_IP, SERVER_PORT))
+
+    data = s.recv(4096)
+    if data[0] == 1:
+        print("Start successful")
+    else:
+        print("Start not successful")
+        raise RuntimeError()
 
     conversion_factor = ((2.0 * VREF) / GAIN / (pow(2, RESOLUTION) - 1)) * 1000 * 1000
 
