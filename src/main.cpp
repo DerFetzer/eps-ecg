@@ -10,8 +10,8 @@
 #include <WiFiUdp.h>
 
 // Set WiFi credentials
-#define WIFI_SSID ***REMOVED***
-#define WIFI_PASS ***REMOVED***
+#define WIFI_SSID "SSID"
+#define WIFI_PASS "PW"
 
 // UDP
 #define UDP_PORT 4210
